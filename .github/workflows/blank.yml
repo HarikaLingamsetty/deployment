@@ -1,0 +1,104 @@
+name: DR/Aggr config changes
+
+on:
+  workflow_dispatch:
+    inputs:
+      adapters:
+        description: 'Comma-separated adapter versions (e.g., v1,v2)'
+        required: true
+        type: string
+      configType:
+        description: 'DR/aggr'
+        required: true
+        type: choice
+        options:
+          - dr
+          - aggr
+      environment:
+        description: 'Environment (prod/release/stage)'
+        required: true
+        type: choice
+        options:
+          - prod
+          - release
+          - stage
+
+jobs:
+  update-values:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Set up environment variables
+        id: setup
+        run: |
+          echo "ADAPTERS=${{ github.event.inputs.adapters }}" >> $GITHUB_ENV
+          echo "CONFIG_TYPE=${{ github.event.inputs.configType }}" >> $GITHUB_ENV
+          echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          IFS=',' read -r -a adapter_list <<< "${ADAPTERS}"
+          echo "ADAPTER_LIST=${adapter_list[@]}" >> $GITHUB_ENV
+
+      - name: Define base directories
+        id: directories
+        run: |
+          BASE_DIRECTORIES=(
+            "stocks-order-holding-tr-adapter"
+            "stocks-order-request-tr-adapter"
+            "stocks-order-margin-tr-adapter"
+          )
+          echo "BASE_DIRECTORIES=${BASE_DIRECTORIES[@]}" >> $GITHUB_ENV
+
+      - name: Iterate through adapters and directories
+        run: |
+          for adapter in ${{ env.ADAPTER_LIST }}; do
+            if [ "${CONFIG_TYPE}" == "dr" ]; then
+              CONFIG_MAP_NAME="${adapter}-dr-ll-adapter-config"
+            else
+              CONFIG_MAP_NAME="${adapter}-aggr-ll-adapter-config"
+            fi
+
+            for base_dir in ${{ env.BASE_DIRECTORIES }}; do
+              path="${adapter}-${base_dir}/gcp/primary/${{ env.ENVIRONMENT }}/values.yaml"
+          
+              if [ -f "$path" ]; then
+                echo "Modifying $path..."
+
+                # Update the values.yaml file within the specified path
+                sed -i "/stocks-core-helm-charts/,/volumes/ {
+                  s/name: ${adapter}-ll-adapter-config/name: ${CONFIG_MAP_NAME}/g
+                  s/name: ${adapter}-adapter-config/name: ${CONFIG_MAP_NAME}/g
+                }" "$path"
+
+                echo "$path updated successfully."
+              else
+                echo "$path does not exist."
+              fi
+            done
+          done
+
+      - name: Create a new branch
+        run: |
+          ADAPTERS_BRANCH_NAME=$(echo "${{ github.event.inputs.adapters }}" | tr ',' '-')
+          git checkout -b update-${CONFIG_TYPE}-${{ github.event.inputs.environment }}-${ADAPTERS_BRANCH_NAME}-${{ github.sha }}
+
+      - name: Commit changes
+        run: |
+          git config --global user.name "github-actions[bot]"
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git add .
+          git commit -m "Updated values.yaml files based on input parameters" || echo "No changes to commit."
+
+      - name: Push changes to new branch
+        run: |
+          ADAPTERS_BRANCH_NAME=$(echo "${{ github.event.inputs.adapters }}" | tr ',' '-')
+          git push origin update-${CONFIG_TYPE}-${{ github.event.inputs.environment }}-${ADAPTERS_BRANCH_NAME}-${{ github.sha }}
+
+      - name: Create Pull Request
+        uses: repo-sync/pull-request@v2
+        with:
+          source_branch: update-${CONFIG_TYPE}-${{ github.event.inputs.environment }}-${ADAPTERS_BRANCH_NAME}-${{ github.sha }}
+          destination_branch: main  # Update this if your default branch is different
+          pr_title: "Update values.yaml for ${CONFIG_TYPE} config changes in adapters: ${{ github.event.inputs.adapters }}"
+          pr_body: "This PR updates values.yaml files based on the ${CONFIG_TYPE} configuration changes for adapters: ${{ github.event.inputs.adapters }}."
+          github_token: ${{ secrets.GITHUB_TOKEN }}
